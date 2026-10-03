@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/zsm-core", "crates/zsm"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Zeliper"]
+repository = "https://github.com/Zeliper/Z-Service-Manager"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
