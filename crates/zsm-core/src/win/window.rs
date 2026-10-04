@@ -82,3 +82,20 @@ pub fn dialog_code_message(lparam: isize) -> Option<(u32, usize)> {
     let msg = unsafe { &*(lparam as *const windows::Win32::UI::WindowsAndMessaging::MSG) };
     Some((msg.message, msg.wParam.0))
 }
+
+/// Renames the menu item with command `id` in menu `hmenu`.
+pub fn set_menu_item_text(hmenu: isize, id: u32, text: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetMenuItemInfoW, HMENU, MENUITEMINFOW, MIIM_STRING,
+    };
+    let mut wide = super::wide(text);
+    let info = MENUITEMINFOW {
+        cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+        fMask: MIIM_STRING,
+        dwTypeData: windows::core::PWSTR(wide.as_mut_ptr()),
+        ..Default::default()
+    };
+    unsafe {
+        let _ = SetMenuItemInfoW(HMENU(hmenu as *mut _), id, false, &info);
+    }
+}

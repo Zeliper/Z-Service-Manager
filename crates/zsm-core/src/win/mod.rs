@@ -21,7 +21,9 @@ pub use shell::{
     block_shutdown, bring_to_front, ctrl_down, cursor_pos, request_early_shutdown_notification,
     shell_open, unblock_shutdown,
 };
-pub use window::{dialog_code_message, post_close, set_visible, top_level_windows, WindowId};
+pub use window::{
+    dialog_code_message, post_close, set_menu_item_text, set_visible, top_level_windows, WindowId,
+};
 
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use windows::Win32::Foundation::HANDLE;

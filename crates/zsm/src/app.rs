@@ -10,6 +10,7 @@ use native_windows_gui as nwg;
 use zsm_core::config::{Config, Kind, ServiceConfig, ServiceEntry};
 use zsm_core::manager::{Manager, ManagerOptions};
 use zsm_core::supervisor::{CtrlBreakHelper, Event, Service, State, StopMode};
+use zsm_core::update::{self, Release};
 use zsm_core::win::{self, RichEdit, WindowId};
 use zsm_core::{paths, VERSION};
 
@@ -17,6 +18,7 @@ use crate::console::ConsoleView;
 use crate::dialog::edit_service;
 use crate::format::{memory, state_label, uptime};
 use crate::summary::{summarize, TrayColor};
+use crate::updater::{self, UpdateMsg};
 
 pub const APP_NAME: &str = "Z Service Manager";
 const RUN_VALUE: &str = "ZServiceManager";
@@ -48,6 +50,7 @@ pub struct AppOptions {
     pub tray_mode: bool,
     pub resume_ids: Vec<String>,
     pub activate_message: u32,
+    pub instance: Option<win::SingleInstance>,
 }
 
 #[derive(Default)]
@@ -71,6 +74,8 @@ struct Ui {
     mi_autostart: nwg::MenuItem,
     mi_exit: nwg::MenuItem,
     menu_help: nwg::Menu,
+    mi_check_update: nwg::MenuItem,
+    mi_install_update: nwg::MenuItem,
     mi_logs: nwg::MenuItem,
     mi_about: nwg::MenuItem,
     separators: Vec<nwg::MenuSeparator>,
@@ -79,6 +84,7 @@ struct Ui {
     ti_open: nwg::MenuItem,
     ti_start_all: nwg::MenuItem,
     ti_stop_all: nwg::MenuItem,
+    ti_check_update: nwg::MenuItem,
     ti_exit: nwg::MenuItem,
     notice: nwg::Notice,
 }
@@ -94,6 +100,8 @@ struct UiState {
     tray_tip: String,
     quitting: bool,
     dialog_open: bool,
+    release: Option<Release>,
+    update_busy: bool,
 }
 
 pub struct App {
@@ -106,6 +114,9 @@ pub struct App {
     console: RefCell<ConsoleView>,
     rebuilding: Cell<bool>,
     quit_ready: Arc<AtomicBool>,
+    updates_tx: crossbeam_channel::Sender<UpdateMsg>,
+    updates_rx: Receiver<UpdateMsg>,
+    instance: RefCell<Option<win::SingleInstance>>,
     ticker_stop: Arc<AtomicBool>,
     handlers: RefCell<Vec<nwg::RawEventHandler>>,
     event_handler: RefCell<Option<nwg::EventHandler>>,
@@ -228,6 +239,13 @@ fn build_ui(ui: &mut Ui) -> Result<(), nwg::NwgError> {
         .text("도움말")
         .parent(w)
         .build(&mut ui.menu_help)?;
+    item("업데이트 확인", &ui.menu_help, &mut ui.mi_check_update)?;
+    nwg::MenuItem::builder()
+        .text("업데이트 설치")
+        .disabled(true)
+        .parent(&ui.menu_help)
+        .build(&mut ui.mi_install_update)?;
+    separator(&ui.menu_help, &mut ui.separators)?;
     item("로그 폴더 열기", &ui.menu_help, &mut ui.mi_logs)?;
     item("정보", &ui.menu_help, &mut ui.mi_about)?;
 
@@ -244,6 +262,8 @@ fn build_ui(ui: &mut Ui) -> Result<(), nwg::NwgError> {
     item("모두 시작", &ui.tray_menu, &mut ui.ti_start_all)?;
     item("모두 중지", &ui.tray_menu, &mut ui.ti_stop_all)?;
     separator(&ui.tray_menu, &mut ui.separators)?;
+    item("업데이트 확인", &ui.tray_menu, &mut ui.ti_check_update)?;
+    separator(&ui.tray_menu, &mut ui.separators)?;
     item("종료", &ui.tray_menu, &mut ui.ti_exit)?;
 
     nwg::Notice::builder().parent(w).build(&mut ui.notice)?;
@@ -251,7 +271,9 @@ fn build_ui(ui: &mut Ui) -> Result<(), nwg::NwgError> {
 }
 
 impl App {
-    pub fn build(opts: AppOptions) -> Result<Rc<App>, nwg::NwgError> {
+    pub fn build(mut opts: AppOptions) -> Result<Rc<App>, nwg::NwgError> {
+        let instance = opts.instance.take();
+        let (updates_tx, updates_rx) = crossbeam_channel::unbounded();
         let mut ui = Ui::default();
         build_ui(&mut ui)?;
 
@@ -287,12 +309,23 @@ impl App {
             console: RefCell::new(console),
             rebuilding: Cell::new(false),
             quit_ready: Arc::new(AtomicBool::new(false)),
+            updates_tx,
+            updates_rx,
+            instance: RefCell::new(instance),
             ticker_stop: Arc::new(AtomicBool::new(false)),
             handlers: RefCell::new(Vec::new()),
             event_handler: RefCell::new(None),
         });
         app.bind_events();
         app.start_ticker();
+        let app_settings = app.config.borrow().app.clone();
+        if app_settings.check_updates {
+            updater::schedule(
+                app.updates_tx.clone(),
+                app.ui.notice.sender(),
+                app_settings.update_check_interval_hours,
+            );
+        }
         app.ui
             .mi_autostart
             .set_checked(win::run_entry(RUN_VALUE).is_some());
@@ -442,6 +475,10 @@ impl App {
             self.show_window();
         } else if handle == ui.ti_start_all.handle {
             self.manager.borrow().start_all();
+        } else if handle == ui.mi_check_update.handle || handle == ui.ti_check_update.handle {
+            updater::check_now(self.updates_tx.clone(), ui.notice.sender(), true);
+        } else if handle == ui.mi_install_update.handle {
+            self.install_update();
         } else if handle == ui.ti_stop_all.handle {
             self.manager.borrow().stop_all(StopMode::Normal);
         } else if handle == ui.ti_exit.handle || handle == ui.mi_exit.handle {
@@ -787,6 +824,7 @@ impl App {
 
     fn refresh(&self) {
         self.drain_events();
+        self.drain_updates();
         self.refresh_rows();
         self.refresh_tray();
         if self.ui.window.visible() {
@@ -903,6 +941,161 @@ impl App {
         let Some(svc) = mgr.get(&id) else { return };
         let console = &self.ui.console;
         self.console.borrow_mut().pull(svc, || console.clear());
+    }
+
+    fn drain_updates(&self) {
+        let msgs: Vec<UpdateMsg> = self.updates_rx.try_iter().collect();
+        for msg in msgs {
+            match msg {
+                UpdateMsg::Checked { manual, result } => self.on_update_checked(manual, result),
+                UpdateMsg::Downloaded(Ok(installer)) => self.stop_for_update(installer),
+                UpdateMsg::Downloaded(Err(e)) => {
+                    log::error!("업데이트 다운로드 실패: {e}");
+                    self.state.borrow_mut().update_busy = false;
+                    self.balloon("업데이트 중단", &e, nwg::TrayNotificationFlags::ERROR_ICON);
+                }
+                UpdateMsg::ServicesStopped(installer) => self.run_installer(&installer),
+            }
+        }
+    }
+
+    fn on_update_checked(&self, manual: bool, result: Result<Option<Release>, String>) {
+        match result {
+            Ok(Some(release)) => {
+                let known = self
+                    .state
+                    .borrow()
+                    .release
+                    .as_ref()
+                    .map(|r| r.version.clone());
+                let label = format!("업데이트 설치 (v{})", release.version);
+                if let Some((menu, id)) = self.ui.mi_install_update.handle.hmenu_item() {
+                    win::set_menu_item_text(menu as isize, id, &label);
+                }
+                self.ui.mi_install_update.set_enabled(true);
+                if known.as_ref() != Some(&release.version) {
+                    log::info!("새 버전 발견: v{}", release.version);
+                    self.balloon(
+                        "업데이트 있음",
+                        &format!(
+                            "v{} 를 설치할 수 있어. 도움말 메뉴에서 설치해줘.",
+                            release.version
+                        ),
+                        nwg::TrayNotificationFlags::INFO_ICON,
+                    );
+                }
+                self.state.borrow_mut().release = Some(release);
+                if manual {
+                    self.install_update();
+                }
+            }
+            Ok(None) if manual => {
+                nwg::modal_info_message(
+                    &self.ui.window,
+                    APP_NAME,
+                    &format!("최신 버전이야 (v{VERSION})."),
+                );
+            }
+            Ok(None) => {}
+            Err(e) if manual => {
+                nwg::modal_error_message(
+                    &self.ui.window,
+                    APP_NAME,
+                    &format!("업데이트 확인 실패: {e}"),
+                );
+            }
+            Err(_) => {}
+        }
+    }
+
+    fn install_update(&self) {
+        let Some(release) = self.state.borrow().release.clone() else {
+            return;
+        };
+        if self.state.borrow().update_busy {
+            return;
+        }
+        if !update::is_installed() {
+            nwg::modal_info_message(
+                &self.ui.window,
+                APP_NAME,
+                &format!(
+                    "포터블 실행이라 자동 설치는 하지 않아. v{} 릴리스 페이지를 열게.",
+                    release.version
+                ),
+            );
+            let page = if release.page_url.is_empty() {
+                update::RELEASES_PAGE
+            } else {
+                &release.page_url
+            };
+            let _ = win::shell_open(page);
+            return;
+        }
+        let active = self.manager.borrow().active_ids().len();
+        let choice = nwg::modal_message(
+            &self.ui.window,
+            &nwg::MessageParams {
+                title: APP_NAME,
+                content: &format!(
+                    "v{} 로 업데이트할까?\n\n실행 중인 서비스 {active}개가 정상 중지되고, 설치가 끝나면 다시 시작돼.",
+                    release.version
+                ),
+                buttons: nwg::MessageButtons::YesNo,
+                icons: nwg::MessageIcons::Question,
+            },
+        );
+        if choice != nwg::MessageChoice::Yes {
+            return;
+        }
+        self.state.borrow_mut().update_busy = true;
+        log::info!("업데이트 v{} 다운로드 시작", release.version);
+        updater::download(self.updates_tx.clone(), self.ui.notice.sender(), release);
+    }
+
+    fn stop_for_update(&self, installer: std::path::PathBuf) {
+        let mgr = self.manager.borrow();
+        let active = mgr.active_ids();
+        if let Err(e) = update::write_resume(&paths::resume_file(), &active) {
+            log::error!("resume.json 기록 실패: {e}");
+        }
+        log::info!("업데이트 설치 준비: 서비스 {active:?} 중지");
+        self.state.borrow_mut().quitting = true;
+        mgr.stop_all(StopMode::Normal);
+        updater::wait_then_install(
+            self.updates_tx.clone(),
+            self.ui.notice.sender(),
+            mgr.activity(),
+            installer,
+        );
+    }
+
+    fn run_installer(&self, installer: &std::path::Path) {
+        // Release the single-instance mutex so the installer's AppMutex check passes.
+        drop(self.instance.borrow_mut().take());
+        let spawned = {
+            let _guard = win::spawn_lock();
+            std::process::Command::new(installer)
+                .args(update::INSTALLER_ARGS)
+                .spawn()
+        };
+        match spawned {
+            Ok(_) => {
+                log::info!("설치 프로그램 실행: {}", installer.display());
+                self.quit_ready.store(true, Ordering::SeqCst);
+            }
+            Err(e) => {
+                log::error!("설치 프로그램 실행 실패: {e}");
+                let _ = std::fs::remove_file(paths::resume_file());
+                self.state.borrow_mut().quitting = false;
+                self.state.borrow_mut().update_busy = false;
+                nwg::modal_error_message(
+                    &self.ui.window,
+                    APP_NAME,
+                    &format!("설치 프로그램 실행 실패: {e}"),
+                );
+            }
+        }
     }
 
     fn request_quit(&self) {

@@ -7,6 +7,7 @@ mod metrics;
 pub mod output;
 pub mod paths;
 pub mod supervisor;
+pub mod update;
 pub mod win;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

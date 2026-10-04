@@ -6,6 +6,7 @@ mod console;
 mod dialog;
 mod format;
 mod summary;
+mod updater;
 
 use native_windows_gui as nwg;
 use zsm_core::{paths, win};
@@ -52,12 +53,13 @@ fn main() {
         std::process::exit(i32::from(win::send_ctrl_break_attached(pid).is_err()));
     }
     let tray_mode = args.iter().any(|a| a == "--tray");
+    let resume = args.iter().any(|a| a == "--resume");
 
     init_logging();
     log::info!("{APP_NAME} v{} 시작 (args: {args:?})", zsm_core::VERSION);
 
     let activate_message = win::register_message(ACTIVATE_MESSAGE);
-    let _instance = match win::acquire_single_instance(INSTANCE_MUTEX) {
+    let instance = match win::acquire_single_instance(INSTANCE_MUTEX) {
         Ok(Some(guard)) => Some(guard),
         Ok(None) => {
             log::info!("이미 실행 중인 인스턴스를 활성화하고 종료");
@@ -79,8 +81,13 @@ fn main() {
 
     let app = match App::build(AppOptions {
         tray_mode,
-        resume_ids: Vec::new(),
+        resume_ids: if resume {
+            zsm_core::update::take_resume(&paths::resume_file())
+        } else {
+            Vec::new()
+        },
         activate_message,
+        instance,
     }) {
         Ok(app) => app,
         Err(e) => {
