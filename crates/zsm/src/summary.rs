@@ -73,3 +73,41 @@ mod tests {
         assert_eq!((s.running, s.total), (2, 3));
     }
 }
+
+/// Which per-service actions make sense right now (shared by buttons and the context menu).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Allowed {
+    pub start: bool,
+    pub stop: bool,
+    pub restart: bool,
+    pub window: bool,
+    pub input: bool,
+}
+
+pub fn allowed(state: Option<State>, gui: bool) -> Allowed {
+    use State::*;
+    Allowed {
+        start: matches!(state, Some(Stopped | Crashed | Failed | Backoff)),
+        stop: matches!(state, Some(Starting | Running | Backoff)),
+        restart: matches!(state, Some(Running | Stopped | Crashed | Failed | Backoff)),
+        window: gui && state == Some(Running),
+        input: !gui && matches!(state, Some(Running | Stopping)),
+    }
+}
+
+#[cfg(test)]
+mod allowed_tests {
+    use super::*;
+
+    #[test]
+    fn actions_follow_state() {
+        assert_eq!(allowed(None, false), Allowed::default());
+        let running = allowed(Some(State::Running), false);
+        assert!(
+            !running.start && running.stop && running.restart && running.input && !running.window
+        );
+        assert!(allowed(Some(State::Running), true).window);
+        let invalid = allowed(Some(State::Invalid), false);
+        assert!(!invalid.start && !invalid.stop && !invalid.restart);
+    }
+}

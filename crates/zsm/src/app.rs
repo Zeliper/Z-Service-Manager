@@ -17,7 +17,7 @@ use zsm_core::{paths, VERSION};
 use crate::console::ConsoleView;
 use crate::dialog::edit_service;
 use crate::format::{memory, state_label, uptime};
-use crate::summary::{summarize, TrayColor};
+use crate::summary::{allowed, summarize, TrayColor};
 use crate::updater::{self, UpdateMsg};
 
 pub const APP_NAME: &str = "Z Service Manager";
@@ -85,8 +85,33 @@ struct Ui {
     ti_start_all: nwg::MenuItem,
     ti_stop_all: nwg::MenuItem,
     ti_check_update: nwg::MenuItem,
+    list_menu: nwg::Menu,
+    li_start: nwg::MenuItem,
+    li_stop: nwg::MenuItem,
+    li_restart: nwg::MenuItem,
+    li_window: nwg::MenuItem,
+    li_edit: nwg::MenuItem,
+    li_delete: nwg::MenuItem,
+    li_logs: nwg::MenuItem,
+    li_add: nwg::MenuItem,
     ti_exit: nwg::MenuItem,
     notice: nwg::Notice,
+}
+
+#[derive(Clone, Copy)]
+enum Action {
+    Start,
+    Stop,
+    Restart,
+    ToggleWindow,
+}
+
+fn window_label(visible: bool) -> &'static str {
+    if visible {
+        "창 숨기기"
+    } else {
+        "창 보이기"
+    }
 }
 
 #[derive(Default)]
@@ -265,6 +290,21 @@ fn build_ui(ui: &mut Ui) -> Result<(), nwg::NwgError> {
     item("업데이트 확인", &ui.tray_menu, &mut ui.ti_check_update)?;
     separator(&ui.tray_menu, &mut ui.separators)?;
     item("종료", &ui.tray_menu, &mut ui.ti_exit)?;
+
+    nwg::Menu::builder()
+        .popup(true)
+        .parent(w)
+        .build(&mut ui.list_menu)?;
+    item("시작", &ui.list_menu, &mut ui.li_start)?;
+    item("중지", &ui.list_menu, &mut ui.li_stop)?;
+    item("재시작", &ui.list_menu, &mut ui.li_restart)?;
+    item("창 보이기", &ui.list_menu, &mut ui.li_window)?;
+    separator(&ui.list_menu, &mut ui.separators)?;
+    item("편집...", &ui.list_menu, &mut ui.li_edit)?;
+    item("삭제", &ui.list_menu, &mut ui.li_delete)?;
+    item("로그 폴더 열기", &ui.list_menu, &mut ui.li_logs)?;
+    separator(&ui.list_menu, &mut ui.separators)?;
+    item("서비스 추가...", &ui.list_menu, &mut ui.li_add)?;
 
     nwg::Notice::builder().parent(w).build(&mut ui.notice)?;
     Ok(())
@@ -447,31 +487,97 @@ impl App {
             nwg::Event::OnListViewItemChanged | nwg::Event::OnListViewClick => {
                 self.sync_selection()
             }
+            nwg::Event::OnListViewRightClick if handle == ui.list.handle => self.show_list_menu(),
             _ => {}
         }
     }
 
     fn on_button(&self, handle: nwg::ControlHandle) {
         let ui = &self.ui;
+        let action = if handle == ui.btn_start.handle {
+            Action::Start
+        } else if handle == ui.btn_stop.handle {
+            Action::Stop
+        } else if handle == ui.btn_restart.handle {
+            Action::Restart
+        } else if handle == ui.btn_window.handle {
+            Action::ToggleWindow
+        } else {
+            return;
+        };
+        self.run_action(action);
+    }
+
+    fn run_action(&self, action: Action) {
         let Some(id) = self.state.borrow().selected.clone() else {
             return;
         };
         let mgr = self.manager.borrow();
         let Some(svc) = mgr.get(&id) else { return };
-        if handle == ui.btn_start.handle {
-            svc.start();
-        } else if handle == ui.btn_stop.handle {
-            svc.stop(StopMode::Normal);
-        } else if handle == ui.btn_restart.handle {
-            svc.restart();
-        } else if handle == ui.btn_window.handle {
-            svc.set_window_visible(!svc.status().window_visible);
+        match action {
+            Action::Start => svc.start(),
+            Action::Stop => svc.stop(StopMode::Normal),
+            Action::Restart => svc.restart(),
+            Action::ToggleWindow => svc.set_window_visible(!svc.status().window_visible),
         }
+    }
+
+    /// Right-click on the service list: select the row under the cursor and show its actions.
+    fn show_list_menu(&self) {
+        self.sync_selection();
+        let ui = &self.ui;
+        let selected = self.state.borrow().selected.clone();
+        let (state, gui, visible) = {
+            let mgr = self.manager.borrow();
+            match selected.as_deref().and_then(|id| mgr.get(id)) {
+                Some(s) => {
+                    let st = s.status();
+                    (
+                        Some(st.state),
+                        s.config().kind == Kind::Gui,
+                        st.window_visible,
+                    )
+                }
+                None => (None, false, false),
+            }
+        };
+        let can = allowed(state, gui);
+        let has = selected.is_some();
+        ui.li_start.set_enabled(can.start);
+        ui.li_stop.set_enabled(can.stop);
+        ui.li_restart.set_enabled(can.restart);
+        ui.li_window.set_enabled(can.window);
+        if let Some((menu, id)) = ui.li_window.handle.hmenu_item() {
+            win::set_menu_item_text(menu as isize, id, window_label(visible));
+        }
+        ui.li_edit.set_enabled(has);
+        ui.li_delete.set_enabled(has);
+        ui.li_logs.set_enabled(has);
+        let (x, y) = win::cursor_pos();
+        ui.list_menu.popup(x, y);
     }
 
     fn on_menu(&self, handle: nwg::ControlHandle) {
         let ui = &self.ui;
-        if handle == ui.ti_open.handle {
+        let list_action = [
+            (&ui.li_start, Action::Start),
+            (&ui.li_stop, Action::Stop),
+            (&ui.li_restart, Action::Restart),
+            (&ui.li_window, Action::ToggleWindow),
+        ]
+        .into_iter()
+        .find(|(item, _)| item.handle == handle);
+        if let Some((_, action)) = list_action {
+            self.run_action(action);
+        } else if handle == ui.li_edit.handle {
+            self.edit_selected();
+        } else if handle == ui.li_delete.handle {
+            self.delete_selected();
+        } else if handle == ui.li_add.handle {
+            self.add_service();
+        } else if handle == ui.li_logs.handle {
+            self.open_service_logs();
+        } else if handle == ui.ti_open.handle {
             self.show_window();
         } else if handle == ui.ti_start_all.handle {
             self.manager.borrow().start_all();
@@ -791,31 +897,17 @@ impl App {
                 b.set_enabled(on);
             }
         };
-        use State::*;
-        set(
-            &ui.btn_start,
-            matches!(state, Some(Stopped | Crashed | Failed | Backoff)),
-        );
-        set(
-            &ui.btn_stop,
-            matches!(state, Some(Starting | Running | Backoff)),
-        );
-        set(
-            &ui.btn_restart,
-            matches!(state, Some(Running | Stopped | Crashed | Failed | Backoff)),
-        );
-        set(&ui.btn_window, kind == Kind::Gui && state == Some(Running));
-        let label = if visible {
-            "창 숨기기"
-        } else {
-            "창 보이기"
-        };
+        let can = allowed(state, kind == Kind::Gui);
+        set(&ui.btn_start, can.start);
+        set(&ui.btn_stop, can.stop);
+        set(&ui.btn_restart, can.restart);
+        set(&ui.btn_window, can.window);
+        let label = window_label(visible);
         if ui.btn_window.text() != label {
             ui.btn_window.set_text(label);
         }
-        let input_on = kind == Kind::Console && matches!(state, Some(Running | Stopping));
-        if ui.input.enabled() != input_on {
-            ui.input.set_enabled(input_on);
+        if ui.input.enabled() != can.input {
+            ui.input.set_enabled(can.input);
         }
         let has = svc.is_some();
         ui.mi_edit.set_enabled(has);
@@ -1293,6 +1385,15 @@ impl App {
             self.state.borrow_mut().selected = None;
             self.apply_config();
         }
+    }
+
+    fn open_service_logs(&self) {
+        let Some(id) = self.state.borrow().selected.clone() else {
+            return;
+        };
+        let dir = paths::logs_dir().join(id);
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = win::shell_open(&dir.to_string_lossy());
     }
 
     fn toggle_autostart(&self) {
