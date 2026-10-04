@@ -234,6 +234,8 @@ struct Child {
     reader: Option<(JoinHandle<()>, Receiver<()>)>,
     started: Instant,
     hidden_windows: HashSet<WindowId>,
+    /// GUI launchers may exit while the real app keeps running in the job.
+    main_exit: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -446,6 +448,7 @@ impl Supervisor {
             reader,
             started: now,
             hidden_windows: HashSet::new(),
+            main_exit: None,
         });
         {
             let mut st = self.shared.status.lock().unwrap();
@@ -462,11 +465,7 @@ impl Supervisor {
 
     fn tick(&mut self) {
         let now = Instant::now();
-        let exited = self
-            .child
-            .as_ref()
-            .and_then(|c| c.process.wait(Some(Duration::ZERO)).ok().flatten());
-        if let Some(code) = exited {
+        if let Some(code) = self.poll_exit() {
             self.on_exit(code);
         }
         if let Some((phase, deadline)) = self.stop {
@@ -487,6 +486,25 @@ impl Supervisor {
             self.next_hide = now + HIDE_INTERVAL;
             self.hide_new_windows(now);
         }
+    }
+
+    fn poll_exit(&mut self) -> Option<u32> {
+        let gui = self.config.kind == Kind::Gui;
+        let child = self.child.as_mut()?;
+        if let Some(code) = child.main_exit {
+            let empty = child.job.process_ids().map_or(true, |p| p.is_empty());
+            return empty.then_some(code);
+        }
+        let code = child.process.wait(Some(Duration::ZERO)).ok().flatten()?;
+        let remaining = child.job.process_ids().map_or(0, |p| p.len());
+        if gui && remaining > 0 {
+            child.main_exit = Some(code);
+            self.sink().system(format!(
+                "주 프로세스 종료 (종료 코드 {code}), 남은 프로세스 {remaining}개를 계속 추적"
+            ));
+            return None;
+        }
+        Some(code)
     }
 
     fn sample_metrics(&mut self) {
