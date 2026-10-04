@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::Receiver;
 
 use crate::config::Config;
-use crate::supervisor::{Context, CtrlBreakHelper, Event, Notify, Service, StopMode};
+use crate::supervisor::{Context, CtrlBreakHelper, Event, Notify, Service, StatusProbe, StopMode};
 
 pub struct ManagerOptions {
     pub log_root: std::path::PathBuf,
@@ -59,8 +59,9 @@ impl Manager {
         for svc in &old {
             svc.stop(StopMode::Normal);
         }
+        let probes: Vec<StatusProbe> = old.iter().map(Service::probe).collect();
         std::thread::spawn(move || {
-            wait_inactive(&old, Duration::from_secs(120));
+            wait_inactive(&probes, Duration::from_secs(120));
             drop(old);
         });
     }
@@ -95,13 +96,22 @@ impl Manager {
             .collect()
     }
 
-    /// Blocks until no service is starting, running or stopping.
-    pub fn wait_all_inactive(&self, timeout: Duration) -> bool {
-        wait_inactive(&self.services, timeout)
+    /// Snapshot of the current services that another thread can wait on.
+    pub fn activity(&self) -> Activity {
+        Activity(self.services.iter().map(Service::probe).collect())
     }
 }
 
-fn wait_inactive(services: &[Service], timeout: Duration) -> bool {
+pub struct Activity(Vec<StatusProbe>);
+
+impl Activity {
+    /// Blocks until no service is starting, running or stopping.
+    pub fn wait_inactive(&self, timeout: Duration) -> bool {
+        wait_inactive(&self.0, timeout)
+    }
+}
+
+fn wait_inactive(services: &[StatusProbe], timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
         if services.iter().all(|s| !s.status().state.is_active()) {

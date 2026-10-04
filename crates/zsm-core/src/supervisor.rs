@@ -138,6 +138,9 @@ impl Service {
             config: Mutex::new(config.clone()),
             sink: OutputSink::new(ctx.scrollback, ServiceLog::new(ctx.log_root.join(&id))),
         });
+        if let Some(e) = &error {
+            shared.sink.system(format!("설정 오류: {e}"));
+        }
         let (tx, rx) = crossbeam_channel::unbounded();
         let sup = Supervisor::new(config, error, ctx, shared.clone(), rx);
         let thread = std::thread::Builder::new()
@@ -162,6 +165,10 @@ impl Service {
 
     pub fn status(&self) -> Status {
         self.shared.status.lock().unwrap().clone()
+    }
+
+    pub fn probe(&self) -> StatusProbe {
+        StatusProbe(self.shared.clone())
     }
 
     pub fn lines_since(&self, seq: u64) -> Vec<Line> {
@@ -204,6 +211,16 @@ impl Drop for Service {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+}
+
+/// Cheap, thread-safe read access to a service status.
+#[derive(Clone)]
+pub struct StatusProbe(Arc<Shared>);
+
+impl StatusProbe {
+    pub fn status(&self) -> Status {
+        self.0.status.lock().unwrap().clone()
     }
 }
 
@@ -366,7 +383,8 @@ impl Supervisor {
         self.invalid = error.clone();
         self.shared.status.lock().unwrap().message = error.clone();
         match (&error, self.state) {
-            (Some(_), _) => {
+            (Some(e), _) => {
+                self.sink().system(format!("설정 오류: {e}"));
                 self.backoff_until = None;
                 self.set_state(State::Invalid, None);
             }
@@ -612,16 +630,18 @@ impl Supervisor {
             }
             StopPhase::CtrlC => {
                 let t = self.step_timeout(self.config.ctrl_c_timeout_secs);
+                let what = match self.config.io_mode {
+                    IoMode::Pty => "Ctrl+C",
+                    IoMode::Pipe => "Ctrl+Break",
+                };
+                self.sink()
+                    .system(format!("{what} 전송 ({}초 대기)", t.as_secs()));
                 let sent = match self.config.io_mode {
-                    IoMode::Pty => self.write_raw(b"\x03").map(|_| "Ctrl+C"),
-                    IoMode::Pipe => self.send_ctrl_break().map(|_| "Ctrl+Break"),
+                    IoMode::Pty => self.write_raw(b"\x03"),
+                    IoMode::Pipe => self.send_ctrl_break(),
                 };
                 match sent {
-                    Ok(what) => {
-                        self.sink()
-                            .system(format!("{what} 전송 ({}초 대기)", t.as_secs()));
-                        self.stop = Some((phase, now + t));
-                    }
+                    Ok(()) => self.stop = Some((phase, now + t)),
                     Err(e) => {
                         self.sink()
                             .system(format!("Ctrl 이벤트 전송 실패, 건너뜀: {e}"));

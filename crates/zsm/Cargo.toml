@@ -11,4 +11,12 @@ name = "zsm"
 path = "src/main.rs"
 
 [dependencies]
+crossbeam-channel = "0.5.17"
+log = "0.4.34"
+native-windows-derive = "1.0.5"
+native-windows-gui = { version = "1.0.13", default-features = false, features = ["tray-notification", "menu", "rich-textbox", "list-view", "notice", "message-window", "file-dialog", "high-dpi", "image-decoder", "timer", "textbox", "cursor", "clipboard"] }
+simplelog = "0.12.2"
 zsm-core = { path = "../zsm-core" }
+
+[build-dependencies]
+embed-resource = "3.0.11"

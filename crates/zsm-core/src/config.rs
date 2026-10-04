@@ -63,7 +63,7 @@ pub struct ServiceConfig {
     pub args: Vec<String>,
     #[serde(default)]
     pub working_dir: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub io_mode: IoMode,
@@ -265,23 +265,30 @@ impl Config {
     }
 
     pub fn to_toml(&self) -> String {
-        let mut root = toml::Table::new();
-        root.insert(
-            "app".into(),
-            toml::Value::try_from(&self.app).expect("app settings serialize"),
-        );
-        let services: Vec<toml::Value> = self
-            .services
-            .iter()
-            .map(|e| match &e.raw {
-                Some(raw) => toml::Value::Table(raw.clone()),
-                None => toml::Value::try_from(&e.config).expect("service serialize"),
-            })
-            .collect();
-        if !services.is_empty() {
-            root.insert("service".into(), toml::Value::Array(services));
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum Entry<'a> {
+            Parsed(&'a ServiceConfig),
+            Raw(&'a toml::Table),
         }
-        toml::to_string(&root).expect("config serialize")
+        #[derive(Serialize)]
+        struct File<'a> {
+            app: &'a AppSettings,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            service: Vec<Entry<'a>>,
+        }
+        let file = File {
+            app: &self.app,
+            service: self
+                .services
+                .iter()
+                .map(|e| match &e.raw {
+                    Some(raw) => Entry::Raw(raw),
+                    None => Entry::Parsed(&e.config),
+                })
+                .collect(),
+        };
+        toml::to_string(&file).expect("config serialize")
     }
 
     /// Writes the config, keeping the previous file as `config.toml.bak`.

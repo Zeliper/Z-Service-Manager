@@ -10,7 +10,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 pub struct WindowId(isize);
 
 impl WindowId {
-    fn hwnd(self) -> HWND {
+    pub fn from_raw(hwnd: isize) -> WindowId {
+        WindowId(hwnd)
+    }
+
+    pub(super) fn hwnd(self) -> HWND {
         HWND(self.0 as *mut _)
     }
 
@@ -68,4 +72,13 @@ pub fn post_close(window: WindowId) {
     unsafe {
         let _ = PostMessageW(Some(window.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0));
     }
+}
+
+/// For `WM_GETDLGCODE`: the `(message, wparam)` of the MSG that `lparam` points to, if any.
+pub fn dialog_code_message(lparam: isize) -> Option<(u32, usize)> {
+    if lparam == 0 {
+        return None;
+    }
+    let msg = unsafe { &*(lparam as *const windows::Win32::UI::WindowsAndMessaging::MSG) };
+    Some((msg.message, msg.wParam.0))
 }
