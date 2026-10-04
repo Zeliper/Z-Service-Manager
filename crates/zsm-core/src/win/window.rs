@@ -1,0 +1,71 @@
+use windows::core::BOOL;
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindow, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowThreadProcessId,
+    IsWindowVisible, PostMessageW, SetForegroundWindow, ShowWindow, GWL_STYLE, GW_OWNER, SW_HIDE,
+    SW_SHOW, WM_CLOSE, WS_CAPTION,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WindowId(isize);
+
+impl WindowId {
+    fn hwnd(self) -> HWND {
+        HWND(self.0 as *mut _)
+    }
+
+    pub fn is_visible(self) -> bool {
+        unsafe { IsWindowVisible(self.hwnd()) }.as_bool()
+    }
+
+    /// Titled window with a caption: what a user would call the app window.
+    pub fn is_main(self) -> bool {
+        unsafe {
+            let style = GetWindowLongPtrW(self.hwnd(), GWL_STYLE) as u32;
+            style & WS_CAPTION.0 == WS_CAPTION.0 && GetWindowTextLengthW(self.hwnd()) > 0
+        }
+    }
+}
+
+struct EnumState<'a> {
+    pids: &'a [u32],
+    found: Vec<WindowId>,
+}
+
+unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let state = &mut *(lparam.0 as *mut EnumState);
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    let unowned = GetWindow(hwnd, GW_OWNER).map_or(true, |h| h.is_invalid());
+    if unowned && state.pids.contains(&pid) {
+        state.found.push(WindowId(hwnd.0 as isize));
+    }
+    BOOL::from(true)
+}
+
+/// Unowned top-level windows belonging to any of `pids`.
+pub fn top_level_windows(pids: &[u32]) -> Vec<WindowId> {
+    let mut state = EnumState {
+        pids,
+        found: Vec::new(),
+    };
+    unsafe {
+        let _ = EnumWindows(Some(collect), LPARAM(&mut state as *mut _ as isize));
+    }
+    state.found
+}
+
+pub fn set_visible(window: WindowId, visible: bool) {
+    unsafe {
+        let _ = ShowWindow(window.hwnd(), if visible { SW_SHOW } else { SW_HIDE });
+        if visible {
+            let _ = SetForegroundWindow(window.hwnd());
+        }
+    }
+}
+
+pub fn post_close(window: WindowId) {
+    unsafe {
+        let _ = PostMessageW(Some(window.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0));
+    }
+}
