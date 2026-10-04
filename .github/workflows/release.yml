@@ -49,7 +49,7 @@ jobs:
           $lines = Get-ChildItem -File | ForEach-Object {
             "{0}  {1}" -f (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower(), $_.Name
           }
-          $lines | Set-Content SHA256SUMS.txt -Encoding ascii
+          [IO.File]::WriteAllText((Join-Path $PWD "SHA256SUMS.txt"), (($lines -join "`n") + "`n"))
           Get-Content SHA256SUMS.txt
 
       - name: Publish release
